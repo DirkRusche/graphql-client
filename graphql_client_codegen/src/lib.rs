@@ -146,6 +146,21 @@ fn generate_module_token_stream_inner(
         }
     };
 
+    // Compute shared types: in CLI mode, collect all fragments into a shared module.
+    // In derive mode, each invocation is independent, so no sharing.
+    let bound_query = crate::query::BoundQuery {
+        query: &query,
+        schema,
+    };
+    let shared_types = match &options.mode {
+        CodegenMode::Cli => crate::query::collect_shared_types(&bound_query),
+        CodegenMode::Derive => crate::query::SharedTypes::default(),
+    };
+
+    // Generate the shared module (empty if no shared types).
+    let shared_module =
+        crate::codegen::generate_shared_module(&shared_types, &options, bound_query);
+
     // The generated modules.
     let mut modules = Vec::with_capacity(operations.len());
 
@@ -156,12 +171,13 @@ fn generate_module_token_stream_inner(
             resolved_query: &query,
             operation: &operation.1.name,
             options: &options,
+            shared_types: &shared_types,
         }
         .to_token_stream()?;
         modules.push(generated);
     }
 
-    let modules = quote! { #(#modules)* };
+    let modules = quote! { #shared_module #(#modules)* };
 
     Ok(modules)
 }

@@ -1,6 +1,6 @@
 use crate::{
     codegen_options::*,
-    query::{BoundQuery, OperationId},
+    query::{BoundQuery, OperationId, SharedTypes},
     BoxError,
 };
 use heck::*;
@@ -30,6 +30,7 @@ pub(crate) struct GeneratedModule<'a> {
     pub resolved_query: &'a crate::query::Query,
     pub schema: &'a crate::schema::Schema,
     pub options: &'a crate::GraphQLClientCodegenOptions,
+    pub shared_types: &'a SharedTypes,
 }
 
 impl GeneratedModule<'_> {
@@ -42,6 +43,7 @@ impl GeneratedModule<'_> {
                 query: self.resolved_query,
                 schema: self.schema,
             },
+            self.shared_types,
         )?)
     }
 

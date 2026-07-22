@@ -20,6 +20,7 @@ pub(crate) fn response_for_query(
     operation_id: OperationId,
     options: &GraphQLClientCodegenOptions,
     query: BoundQuery<'_>,
+    shared_types: &SharedTypes,
 ) -> Result<TokenStream, GeneralError> {
     let serde = options.serde_path();
 
@@ -28,9 +29,15 @@ pub(crate) fn response_for_query(
     let variable_derives = render_derives(options.all_variable_derives());
 
     let scalar_definitions = generate_scalar_definitions(&all_used_types, options, query);
-    let enum_definitions = enums::generate_enum_definitions(&all_used_types, options, query);
-    let fragment_definitions =
-        generate_fragment_definitions(&all_used_types, &response_derives, options, &query);
+    let enum_definitions =
+        enums::generate_enum_definitions(&all_used_types, options, query, shared_types);
+    let fragment_definitions = generate_fragment_definitions(
+        &all_used_types,
+        &response_derives,
+        options,
+        &query,
+        shared_types,
+    );
     let input_object_definitions = inputs::generate_input_object_definitions(
         &all_used_types,
         options,
@@ -44,9 +51,19 @@ pub(crate) fn response_for_query(
     let definitions =
         render_response_data_fields(operation_id, options, &query)?.render(&response_derives);
 
+    let shared_reexport = if !shared_types.is_empty() {
+        quote!(
+            pub use super::__shared::*;
+        )
+    } else {
+        quote!()
+    };
+
     let q = quote! {
         use #serde::{Serialize, Deserialize};
         use super::*;
+
+        #shared_reexport
 
         #[allow(dead_code)]
         type Boolean = bool;
@@ -245,10 +262,96 @@ fn generate_fragment_definitions<'a>(
     response_derives: &'a impl quote::ToTokens,
     options: &'a GraphQLClientCodegenOptions,
     query: &'a BoundQuery<'a>,
+    shared_types: &'a SharedTypes,
 ) -> impl Iterator<Item = TokenStream> + 'a {
-    all_used_types.fragment_ids().map(move |fragment_id| {
-        selection::render_fragment(fragment_id, options, query).render(&response_derives)
-    })
+    all_used_types
+        .fragment_ids()
+        .filter(move |id| !shared_types.contains_fragment(*id))
+        .map(move |fragment_id| {
+            selection::render_fragment(fragment_id, options, query).render(&response_derives)
+        })
+}
+
+/// Generates the `__shared` module containing fragment definitions and their
+/// dependent types (enums, scalar aliases). Returns an empty TokenStream if
+/// there are no shared types.
+pub(crate) fn generate_shared_module(
+    shared_types: &SharedTypes,
+    options: &GraphQLClientCodegenOptions,
+    query: BoundQuery<'_>,
+) -> TokenStream {
+    if shared_types.is_empty() {
+        return quote!();
+    }
+
+    let serde = options.serde_path();
+    let module_visibility = options.module_visibility();
+    let response_derives = render_derives(options.all_response_derives());
+
+    // Scalar aliases for scalars used by fragments
+    let mut scalar_ids = std::collections::BTreeSet::new();
+    for &fragment_id in &shared_types.fragment_ids {
+        let fragment = query.query.get_fragment(fragment_id);
+        let mut used_types = UsedTypes::default();
+        for (_id, selection) in query.query.walk_selection_set(&fragment.selection_set) {
+            selection.collect_used_types(&mut used_types, &query);
+        }
+        for (scalar_id, _) in used_types.scalars(query.schema) {
+            scalar_ids.insert(scalar_id);
+        }
+    }
+
+    let scalar_definitions = scalar_ids.iter().map(|scalar_id| {
+        let scalar = query.schema.get_scalar(*scalar_id);
+        let ident = syn::Ident::new(
+            options.normalization().scalar_name(&scalar.name).as_ref(),
+            proc_macro2::Span::call_site(),
+        );
+        if let Some(custom_scalars_module) = options.custom_scalars_module() {
+            quote!(type #ident = #custom_scalars_module::#ident;)
+        } else {
+            quote!(type #ident = super::#ident;)
+        }
+    });
+
+    // Enum definitions
+    let enum_definitions = shared_types.enum_ids.iter().filter_map(|enum_id| {
+        let stored_enum = query.schema.get_enum(*enum_id);
+        if options.extern_enums().contains(&stored_enum.name) {
+            None
+        } else {
+            Some(enums::generate_single_enum_definition(stored_enum, options))
+        }
+    });
+
+    // Fragment definitions
+    let fragment_definitions = shared_types.fragment_ids.iter().map(|&fragment_id| {
+        selection::render_fragment(fragment_id, options, &query).render(&response_derives)
+    });
+
+    quote! {
+        #module_visibility mod __shared {
+            #![allow(dead_code)]
+
+            use #serde::{Serialize, Deserialize};
+            use super::*;
+
+            #[allow(dead_code)]
+            type Boolean = bool;
+            #[allow(dead_code)]
+            type Float = f64;
+            #[allow(dead_code)]
+            type Int = i64;
+            #[allow(dead_code)]
+            type ID = String;
+
+            #(#scalar_definitions)*
+
+            #(#enum_definitions)*
+
+            #(#fragment_definitions)*
+        }
+    }
 }
 
 /// For default value constructors.

@@ -579,7 +579,7 @@ impl Query {
             .map(|(idx, selection)| (SelectionId(idx as u32), selection))
     }
 
-    fn walk_selection_set<'a>(
+    pub(crate) fn walk_selection_set<'a>(
         &'a self,
         selection_ids: &'a [SelectionId],
     ) -> impl Iterator<Item = (SelectionId, &'a Selection)> + 'a {
@@ -658,6 +658,65 @@ impl UsedTypes {
 
     pub(crate) fn fragment_ids(&self) -> impl Iterator<Item = ResolvedFragmentId> + '_ {
         self.fragments.iter().copied()
+    }
+}
+
+/// Types that are shared across all operations (fragments and their dependent enums).
+/// In CLI mode, these are generated once in a `__shared` module and re-exported by each
+/// operation module.
+#[derive(Debug, Default)]
+pub(crate) struct SharedTypes {
+    pub(crate) fragment_ids: BTreeSet<ResolvedFragmentId>,
+    pub(crate) enum_ids: BTreeSet<EnumId>,
+}
+
+impl SharedTypes {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.fragment_ids.is_empty()
+    }
+
+    pub(crate) fn contains_fragment(&self, id: ResolvedFragmentId) -> bool {
+        self.fragment_ids.contains(&id)
+    }
+
+    pub(crate) fn contains_enum(&self, id: EnumId) -> bool {
+        self.enum_ids.contains(&id)
+    }
+}
+
+/// Collects all fragment IDs from the query and the enum IDs used by those fragments.
+/// This is used in CLI mode to generate a shared module containing fragment definitions.
+pub(crate) fn collect_shared_types(query: &BoundQuery<'_>) -> SharedTypes {
+    let fragment_ids: BTreeSet<ResolvedFragmentId> = query
+        .query
+        .fragments
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| ResolvedFragmentId(idx as u32))
+        .collect();
+
+    if fragment_ids.is_empty() {
+        return SharedTypes::default();
+    }
+
+    // Walk each fragment's selection set to find dependent enum IDs.
+    let mut used_types = UsedTypes::default();
+    for &fragment_id in &fragment_ids {
+        let fragment = query.query.get_fragment(fragment_id);
+        for (_id, selection) in query.query.walk_selection_set(&fragment.selection_set) {
+            selection.collect_used_types(&mut used_types, query);
+        }
+    }
+
+    let enum_ids: BTreeSet<EnumId> = used_types
+        .types
+        .iter()
+        .filter_map(TypeId::as_enum_id)
+        .collect();
+
+    SharedTypes {
+        fragment_ids,
+        enum_ids,
     }
 }
 

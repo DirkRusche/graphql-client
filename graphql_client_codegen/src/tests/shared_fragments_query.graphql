@@ -1,0 +1,18 @@
+fragment UserFields on User {
+  id
+  name
+  email
+  status
+}
+
+query GetUser($id: ID!) {
+  getUser(id: $id) {
+    ...UserFields
+  }
+}
+
+query ListUsers {
+  listUsers {
+    ...UserFields
+  }
+}

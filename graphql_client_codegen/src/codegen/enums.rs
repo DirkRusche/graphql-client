@@ -1,8 +1,97 @@
 use crate::{
-    codegen::render_derives, codegen_options::GraphQLClientCodegenOptions, query::BoundQuery,
+    codegen::render_derives,
+    codegen_options::GraphQLClientCodegenOptions,
+    normalization::Normalization,
+    query::{BoundQuery, SharedTypes},
+    schema::StoredEnum,
 };
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
+
+/// Renders a single enum to a TokenStream given the enum, derives, serde path, and normalization.
+fn generate_single_enum_token_stream(
+    r#enum: &StoredEnum,
+    derives: &impl quote::ToTokens,
+    serde: &syn::Path,
+    normalization: &Normalization,
+) -> TokenStream {
+    let variant_names: Vec<TokenStream> = r#enum
+        .variants
+        .iter()
+        .map(|v| {
+            let safe_name = super::shared::keyword_replace(v.as_str());
+            let name = normalization.enum_variant(safe_name.as_ref());
+            let name = Ident::new(&name, Span::call_site());
+
+            quote!(#name)
+        })
+        .collect();
+    let variant_names = &variant_names;
+    let name_ident = normalization.enum_name(r#enum.name.as_str());
+    let name_ident = Ident::new(&name_ident, Span::call_site());
+    let constructors: Vec<_> = r#enum
+        .variants
+        .iter()
+        .map(|v| {
+            let safe_name = super::shared::keyword_replace(v);
+            let name = normalization.enum_variant(safe_name.as_ref());
+            let v = Ident::new(&name, Span::call_site());
+
+            quote!(#name_ident::#v)
+        })
+        .collect();
+    let constructors = &constructors;
+    let variant_str: Vec<&str> = r#enum.variants.iter().map(|s| s.as_str()).collect();
+    let variant_str = &variant_str;
+
+    let name = name_ident;
+
+    quote! {
+        #derives
+        pub enum #name {
+            #(#variant_names,)*
+            Other(String),
+        }
+
+        impl #serde::Serialize for #name {
+            fn serialize<S: #serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+                ser.serialize_str(match *self {
+                    #(#constructors => #variant_str,)*
+                    #name::Other(ref s) => &s,
+                })
+            }
+        }
+
+        impl<'de> #serde::Deserialize<'de> for #name {
+            fn deserialize<D: #serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let s: String = #serde::Deserialize::deserialize(deserializer)?;
+
+                match s.as_str() {
+                    #(#variant_str => Ok(#constructors),)*
+                    _ => Ok(#name::Other(s)),
+                }
+            }
+        }
+    }
+}
+
+/// Generates a single enum definition with derives/normalization computed from options.
+/// Used by `generate_shared_module()`.
+pub(crate) fn generate_single_enum_definition(
+    r#enum: &StoredEnum,
+    options: &GraphQLClientCodegenOptions,
+) -> TokenStream {
+    let serde = options.serde_path();
+    let traits = options
+        .all_response_derives()
+        .chain(options.all_variable_derives())
+        .filter(|d| !&["Serialize", "Deserialize", "Default"].contains(d))
+        .collect::<std::collections::BTreeSet<_>>();
+    let derives = render_derives(traits.into_iter());
+    let normalization = options.normalization();
+
+    generate_single_enum_token_stream(r#enum, &derives, serde, normalization)
+}
 
 /**
  * About rust keyword escaping: variant_names and constructors must be escaped,
@@ -15,8 +104,9 @@ pub(super) fn generate_enum_definitions<'a, 'schema: 'a>(
     all_used_types: &'a crate::query::UsedTypes,
     options: &'a GraphQLClientCodegenOptions,
     query: BoundQuery<'schema>,
+    shared_types: &'a SharedTypes,
 ) -> impl Iterator<Item = TokenStream> + 'a {
-    let serde = options.serde_path();
+    let serde = options.serde_path().clone();
     let traits = options
         .all_response_derives()
         .chain(options.all_variable_derives())
@@ -26,65 +116,11 @@ pub(super) fn generate_enum_definitions<'a, 'schema: 'a>(
     let derives = render_derives(traits.into_iter());
     let normalization = options.normalization();
 
-    all_used_types.enums(query.schema)
+    all_used_types
+        .enums(query.schema)
         .filter(move |(_id, r#enum)| !options.extern_enums().contains(&r#enum.name))
+        .filter(move |(id, _)| !shared_types.contains_enum(*id))
         .map(move |(_id, r#enum)| {
-        let variant_names: Vec<TokenStream> = r#enum
-            .variants
-            .iter()
-            .map(|v| {
-                let safe_name = super::shared::keyword_replace(v.as_str());
-                let name = normalization.enum_variant(safe_name.as_ref());
-                let name = Ident::new(&name, Span::call_site());
-
-                quote!(#name)
-            })
-            .collect();
-        let variant_names = &variant_names;
-        let name_ident = normalization.enum_name(r#enum.name.as_str());
-        let name_ident = Ident::new(&name_ident, Span::call_site());
-        let constructors: Vec<_> = r#enum
-            .variants
-            .iter()
-            .map(|v| {
-                let safe_name = super::shared::keyword_replace(v);
-                let name = normalization.enum_variant(safe_name.as_ref());
-                let v = Ident::new(&name, Span::call_site());
-
-                quote!(#name_ident::#v)
-            })
-            .collect();
-        let constructors = &constructors;
-        let variant_str: Vec<&str> = r#enum.variants.iter().map(|s| s.as_str()).collect();
-        let variant_str = &variant_str;
-
-        let name = name_ident;
-
-        quote! {
-            #derives
-            pub enum #name {
-                #(#variant_names,)*
-                Other(String),
-            }
-
-            impl #serde::Serialize for #name {
-                fn serialize<S: #serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-                    ser.serialize_str(match *self {
-                        #(#constructors => #variant_str,)*
-                        #name::Other(ref s) => &s,
-                    })
-                }
-            }
-
-            impl<'de> #serde::Deserialize<'de> for #name {
-                fn deserialize<D: #serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                    let s: String = #serde::Deserialize::deserialize(deserializer)?;
-
-                    match s.as_str() {
-                        #(#variant_str => Ok(#constructors),)*
-                        _ => Ok(#name::Other(s)),
-                    }
-                }
-            }
-        }})
+            generate_single_enum_token_stream(r#enum, &derives, &serde, normalization)
+        })
 }

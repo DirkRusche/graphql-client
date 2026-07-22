@@ -1,0 +1,21 @@
+schema {
+  query: Query
+}
+
+type Query {
+  getUser(id: ID!): User
+  listUsers: [User!]!
+}
+
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  status: Status!
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+  PENDING
+}
