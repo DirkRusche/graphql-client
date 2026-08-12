@@ -11,6 +11,8 @@ const FOOBARS_SCHEMA_PATH: &str = "foobars_schema.graphql";
 const SHARED_FRAGMENTS_QUERY: &str = include_str!("shared_fragments_query.graphql");
 const SHARED_FRAGMENTS_SCHEMA_PATH: &str = "shared_fragments_schema.graphql";
 
+const TRIMMED_QUERIES_QUERY: &str = include_str!("trimmed_queries_query.graphql");
+
 fn build_schema_path(path: &str) -> PathBuf {
     std::env::current_dir()
         .unwrap()
@@ -249,6 +251,120 @@ fn shared_fragments_not_generated_in_derive_mode() {
             panic!("Error: {}\n Generated content: {}\n", e, &generated_code);
         }
     };
+}
+
+/// Extract the value of each generated module's `QUERY` constant, keyed by module name.
+fn extract_module_query_strings(file: &syn::File) -> std::collections::BTreeMap<String, String> {
+    let mut queries = std::collections::BTreeMap::new();
+    for item in &file.items {
+        if let syn::Item::Mod(module) = item {
+            let items = match &module.content {
+                Some((_, items)) => items,
+                None => continue,
+            };
+            for item in items {
+                if let syn::Item::Const(constant) = item {
+                    if constant.ident == "QUERY" {
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(lit_str),
+                            ..
+                        }) = &*constant.expr
+                        {
+                            queries.insert(module.ident.to_string(), lit_str.value());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    queries
+}
+
+#[test]
+fn query_strings_are_trimmed_per_operation() {
+    let schema_path = build_schema_path(SHARED_FRAGMENTS_SCHEMA_PATH);
+    let options = GraphQLClientCodegenOptions::new(CodegenMode::Cli);
+
+    let generated_tokens =
+        generate_module_token_stream_from_string(TRIMMED_QUERIES_QUERY, &schema_path, options)
+            .expect("Generate trimmed queries module");
+
+    let file: syn::File =
+        syn::parse2(generated_tokens).expect("Generated code must be a valid Rust file");
+    let queries = extract_module_query_strings(&file);
+
+    let details_query = queries
+        .get("get_user_details")
+        .expect("get_user_details module has a QUERY constant");
+    let list_query = queries
+        .get("list_user_names")
+        .expect("list_user_names module has a QUERY constant");
+
+    // Each operation's QUERY contains its own operation and not the other one.
+    assert!(details_query.contains("GetUserDetails"));
+    assert!(
+        !details_query.contains("ListUserNames"),
+        "GetUserDetails QUERY must not contain the other operation:\n{}",
+        details_query
+    );
+    assert!(list_query.contains("ListUserNames"));
+    assert!(
+        !list_query.contains("GetUserDetails"),
+        "ListUserNames QUERY must not contain the other operation:\n{}",
+        list_query
+    );
+
+    // The fragment-using operation keeps both the direct and the transitive fragment.
+    assert!(
+        details_query.contains("fragment UserBase"),
+        "GetUserDetails QUERY must contain the directly used fragment:\n{}",
+        details_query
+    );
+    assert!(
+        details_query.contains("fragment ContactInfo"),
+        "GetUserDetails QUERY must contain the transitively used fragment:\n{}",
+        details_query
+    );
+
+    // The other operation contains no fragments at all.
+    assert!(
+        !list_query.contains("fragment"),
+        "ListUserNames QUERY must not contain any fragment:\n{}",
+        list_query
+    );
+
+    // The trimmed strings must round-trip through the GraphQL parser.
+    graphql_parser::parse_query::<&str>(details_query)
+        .expect("GetUserDetails QUERY parses standalone");
+    graphql_parser::parse_query::<&str>(list_query).expect("ListUserNames QUERY parses standalone");
+}
+
+#[test]
+fn query_strings_are_trimmed_in_derive_mode() {
+    let schema_path = build_schema_path(SHARED_FRAGMENTS_SCHEMA_PATH);
+
+    let mut options = GraphQLClientCodegenOptions::new(CodegenMode::Derive);
+    options.set_struct_name("GetUserDetails".to_string());
+    options.set_operation_name("GetUserDetails".to_string());
+
+    let generated_tokens =
+        generate_module_token_stream_from_string(TRIMMED_QUERIES_QUERY, &schema_path, options)
+            .expect("Generate derive mode module");
+
+    let file: syn::File =
+        syn::parse2(generated_tokens).expect("Generated code must be a valid Rust file");
+    let queries = extract_module_query_strings(&file);
+
+    let details_query = queries
+        .get("get_user_details")
+        .expect("get_user_details module has a QUERY constant");
+
+    assert!(details_query.contains("GetUserDetails"));
+    assert!(!details_query.contains("ListUserNames"));
+    assert!(details_query.contains("fragment UserBase"));
+    assert!(details_query.contains("fragment ContactInfo"));
+    graphql_parser::parse_query::<&str>(details_query)
+        .expect("GetUserDetails QUERY parses standalone");
 }
 
 #[test]

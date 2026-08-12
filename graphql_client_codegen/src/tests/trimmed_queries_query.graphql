@@ -1,0 +1,21 @@
+fragment UserBase on User {
+  id
+  name
+  ...ContactInfo
+}
+
+fragment ContactInfo on User {
+  email
+}
+
+query GetUserDetails($id: ID!) {
+  getUser(id: $id) {
+    ...UserBase
+  }
+}
+
+query ListUserNames {
+  listUsers {
+    name
+  }
+}

@@ -20,6 +20,7 @@ mod generated_module;
 /// Normalization-related code
 pub mod normalization;
 mod query;
+mod query_trimming;
 mod type_qualifiers;
 
 #[cfg(test)]
@@ -165,8 +166,15 @@ fn generate_module_token_stream_inner(
     let mut modules = Vec::with_capacity(operations.len());
 
     for operation in &operations {
+        // Trim the document to this operation and the fragments it transitively
+        // references; fall back to the full document when trimming is not possible.
+        let trimmed_query_string = query_trimming::trim_query_for_operation(
+            query_document,
+            &operation.1.name,
+            *options.normalization(),
+        );
         let generated = generated_module::GeneratedModule {
-            query_string: query_string.as_str(),
+            query_string: trimmed_query_string.as_deref().unwrap_or(query_string),
             schema,
             resolved_query: &query,
             operation: &operation.1.name,
